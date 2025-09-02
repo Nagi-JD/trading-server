@@ -497,5 +497,4 @@ app.use((error, req, res, next) => {
 app.listen(PORT, () => {
   console.log(`Self-hosted trading API server running on port ${PORT}`);
   console.log(`Public API: ${FURY_API_URL}`);
-  console.log(`Health check: http://localhost:${PORT}/health`);
 });
