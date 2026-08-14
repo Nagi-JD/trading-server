@@ -6,7 +6,116 @@ const bs58 = require('bs58');
 const app = express();
 const PORT = process.env.PORT || 4444;
 const FURY_API_URL = process.env.FURY_API_URL || 'https://de.fury.bot';
-const FURY_API_KEY = process.env.FURY_API_KEY || '4b911db128185d547203dd27990384509f1bc18faeb01b722329fa60ba6c897e';
+// SECURITY: never hardcode a real key. Provide FURY_API_KEY via the environment
+// (.env is git-ignored). This falls back to empty so a missing key fails loudly
+// instead of shipping a committed secret.
+const FURY_API_KEY = process.env.FURY_API_KEY || '';
+
+// ---------------------------------------------------------------------------
+// Execution provider abstraction (transaction landing)
+//
+// Decouples "who lands the signed transactions" from the trading logic.
+// Supports Helius Sender and Jito, with Fury preserved as an optional fallback.
+// Configure via env:
+//   EXECUTION_PROVIDER   primary: fury | helius-sender | jito   (default: fury)
+//   EXECUTION_FALLBACKS  comma-separated ordered fallbacks       (default: fury)
+//   HELIUS_SENDER_URL    default https://sender.helius-rpc.com/fast
+//   HELIUS_API_KEY       optional for Sender
+//   JITO_ENDPOINT        default https://mainnet.block-engine.jito.wtf
+// ---------------------------------------------------------------------------
+const EXECUTION_PROVIDER = process.env.EXECUTION_PROVIDER || 'fury';
+const EXECUTION_FALLBACKS = (process.env.EXECUTION_FALLBACKS || 'fury')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+const HELIUS_SENDER_URL = process.env.HELIUS_SENDER_URL || 'https://sender.helius-rpc.com/fast';
+const HELIUS_API_KEY = process.env.HELIUS_API_KEY || '';
+const JITO_ENDPOINT = process.env.JITO_ENDPOINT || 'https://mainnet.block-engine.jito.wtf';
+
+// Ordered, de-duplicated provider chain: [primary, ...fallbacks].
+const providerChain = [EXECUTION_PROVIDER, ...EXECUTION_FALLBACKS].filter(
+  (p, i, arr) => arr.indexOf(p) === i,
+);
+
+// Build the HTTP request for a provider given base58-encoded signed transactions.
+const planProviderRequest = (provider, transactions) => {
+  switch (provider) {
+    case 'fury':
+      return {
+        url: `${FURY_API_URL}/api/transactions/send`,
+        options: {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ transactions }),
+        },
+      };
+    case 'jito': {
+      const single = transactions.length === 1;
+      return {
+        url: `${JITO_ENDPOINT}/api/v1/${single ? 'transactions' : 'bundles'}`,
+        options: {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            method: single ? 'sendTransaction' : 'sendBundle',
+            params: single
+              ? [transactions[0], { encoding: 'base58' }]
+              : [transactions, { encoding: 'base58' }],
+          }),
+        },
+      };
+    }
+    case 'helius-sender':
+      // Sender lands single transactions; the caller loops per tx.
+      return {
+        url: HELIUS_API_KEY ? `${HELIUS_SENDER_URL}?api-key=${HELIUS_API_KEY}` : HELIUS_SENDER_URL,
+        options: {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            method: 'sendTransaction',
+            params: [transactions[0], { encoding: 'base58', skipPreflight: true, maxRetries: 0 }],
+          }),
+        },
+      };
+    default:
+      throw new Error(`Unknown execution provider: ${provider}`);
+  }
+};
+
+// Send one bundle's transactions via the provider chain, trying fallbacks on failure.
+const sendBundleViaProviders = async (transactions) => {
+  const failures = [];
+  for (const provider of providerChain) {
+    try {
+      // Helius Sender is single-tx: send each and collect results.
+      const txGroups = provider === 'helius-sender'
+        ? transactions.map((tx) => [tx])
+        : [transactions];
+
+      const results = [];
+      for (const group of txGroups) {
+        const { url, options } = planProviderRequest(provider, group);
+        const response = await fetch(url, options);
+        const data = await response.json();
+        if (data && (data.error || data.success === false)) {
+          const msg = data.error && data.error.message ? data.error.message : (data.error || 'provider error');
+          throw new Error(typeof msg === 'string' ? msg : 'provider error');
+        }
+        results.push(data.result || data);
+      }
+      return { provider, result: results.length === 1 ? results[0] : results };
+    } catch (err) {
+      failures.push(`${provider}: ${err.message}`);
+      console.warn(`Provider ${provider} failed, trying next:`, err.message);
+    }
+  }
+  throw new Error(`All execution providers failed (${providerChain.join(' -> ')}): ${failures.join('; ')}`);
+};
 
 // Middleware
 app.use(cors());
@@ -147,19 +256,11 @@ const sendBundles = async (signedBundles) => {
       await new Promise(resolve => setTimeout(resolve, i * 100));
       await checkRateLimit();
 
-      const response = await fetch(`${FURY_API_URL}/api/transactions/send`, {
-        method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          transactions: bundle.transactions
-        }),
-      });
-
-      const data = await response.json();
-      results.push(data.result || data);
-      console.log(`Bundle ${i + 1} sent successfully`);
+      // Route via the configured execution-provider chain (Helius Sender / Jito
+      // / Fury), falling back through the chain on failure.
+      const { provider, result } = await sendBundleViaProviders(bundle.transactions);
+      results.push(result);
+      console.log(`Bundle ${i + 1} sent successfully via ${provider}`);
     } catch (error) {
       console.error(`Error sending bundle ${i + 1}:`, error);
       results.push({ error: error.message });
