@@ -215,13 +215,21 @@ app.post('/api/tokens/buy', async (req, res) => {
       const walletKeypairs = createKeypairs(walletChunk);
       const walletAddresses = walletKeypairs.map(kp => kp.publicKey.toBase58());
 
+      // Per-wallet amounts must be sliced to match THIS chunk's wallets, not
+      // broadcast whole. Otherwise chunk 2+ would receive amounts meant for
+      // chunk 1's wallets (misaligned allocation).
+      const chunkStart = chunkIndex * 5;
+      const chunkAmounts = Array.isArray(amounts)
+        ? amounts.slice(chunkStart, chunkStart + walletChunk.length)
+        : undefined;
+
       // Prepare request for public API (using addresses instead of private keys)
       const publicApiRequest = {
         walletAddresses,
         tokenAddress,
         protocol,
         solAmount,
-        ...(amounts && { amounts }),
+        ...(chunkAmounts && { amounts: chunkAmounts }),
         ...(slippageBps !== undefined && { slippageBps }),
         ...(jitoTipLamports !== undefined && { jitoTipLamports }),
         ...(telegram && { telegram })
@@ -377,13 +385,20 @@ app.post('/api/tokens/sell', async (req, res) => {
       const walletKeypairs = createKeypairs(walletChunk);
       const walletAddresses = walletKeypairs.map(kp => kp.publicKey.toBase58());
 
+      // Per-wallet token amounts must be sliced to THIS chunk's wallets when an
+      // array is provided; a scalar tokensAmount applies to every wallet as-is.
+      const chunkStart = chunkIndex * 5;
+      const chunkTokensAmount = Array.isArray(tokensAmount)
+        ? tokensAmount.slice(chunkStart, chunkStart + walletChunk.length)
+        : tokensAmount;
+
       // Prepare request for public API (using addresses instead of private keys)
       const publicApiRequest = {
         walletAddresses,
         tokenAddress,
         protocol,
         ...(percentage !== undefined && { percentage }),
-        ...(tokensAmount !== undefined && { tokensAmount }),
+        ...(chunkTokensAmount !== undefined && { tokensAmount: chunkTokensAmount }),
         ...(slippageBps !== undefined && { slippageBps }),
         ...(outputMint && { outputMint }),
         ...(jitoTipLamports !== undefined && { jitoTipLamports }),
