@@ -38,6 +38,8 @@ const JUPITER_ENDPOINT = process.env.JUPITER_ENDPOINT || 'https://tx.jup.ag';
 // SECURITY: never hardcode a real key. Required by tx.jup.ag's x-api-key header.
 const JUPITER_API_KEY = process.env.JUPITER_API_KEY || '';
 
+const solanaTrackerFeed = require('./solanaTrackerFeed');
+
 // Ordered, de-duplicated provider chain: [primary, ...fallbacks].
 const providerChain = [EXECUTION_PROVIDER, ...EXECUTION_FALLBACKS].filter(
   (p, i, arr) => arr.indexOf(p) === i,
@@ -151,6 +153,18 @@ app.use(express.json({ limit: '50mb' }));
 // (solana-ui's pingHealthyServer expects 200 + { status: "healthy" }).
 app.get('/health', (req, res) => {
   res.json({ status: 'healthy' });
+});
+
+// Live token feed (Creations / Migrations), backed by Solana Tracker.
+// See solanaTrackerFeed.js for the polling/caching implementation.
+app.get('/api/feed/creations', (req, res) => {
+  res.json(solanaTrackerFeed.getFeedSnapshot('creations'));
+});
+app.get('/api/feed/graduating', (req, res) => {
+  res.json(solanaTrackerFeed.getFeedSnapshot('graduating'));
+});
+app.get('/api/feed/graduated', (req, res) => {
+  res.json(solanaTrackerFeed.getFeedSnapshot('graduated'));
 });
 
 // Rate limiting state
@@ -645,4 +659,5 @@ app.use((error, req, res, next) => {
 app.listen(PORT, () => {
   console.log(`Self-hosted trading API server running on port ${PORT}`);
   console.log(`Public API: ${FURY_API_URL}`);
+  solanaTrackerFeed.startPolling();
 });
