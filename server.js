@@ -15,13 +15,16 @@ const FURY_API_KEY = process.env.FURY_API_KEY || '';
 // Execution provider abstraction (transaction landing)
 //
 // Decouples "who lands the signed transactions" from the trading logic.
-// Supports Helius Sender and Jito, with Fury preserved as an optional fallback.
+// Supports Helius Sender, Jito, and Jupiter (tx.jup.ag), with Fury preserved
+// as an optional fallback.
 // Configure via env:
-//   EXECUTION_PROVIDER   primary: fury | helius-sender | jito   (default: fury)
-//   EXECUTION_FALLBACKS  comma-separated ordered fallbacks       (default: fury)
+//   EXECUTION_PROVIDER   primary: fury | helius-sender | jito | jupiter   (default: fury)
+//   EXECUTION_FALLBACKS  comma-separated ordered fallbacks                 (default: fury)
 //   HELIUS_SENDER_URL    default https://sender.helius-rpc.com/fast
 //   HELIUS_API_KEY       optional for Sender
 //   JITO_ENDPOINT        default https://mainnet.block-engine.jito.wtf
+//   JUPITER_ENDPOINT     default https://tx.jup.ag
+//   JUPITER_API_KEY      required by tx.jup.ag (x-api-key header)
 // ---------------------------------------------------------------------------
 const EXECUTION_PROVIDER = process.env.EXECUTION_PROVIDER || 'fury';
 const EXECUTION_FALLBACKS = (process.env.EXECUTION_FALLBACKS || 'fury')
@@ -31,6 +34,9 @@ const EXECUTION_FALLBACKS = (process.env.EXECUTION_FALLBACKS || 'fury')
 const HELIUS_SENDER_URL = process.env.HELIUS_SENDER_URL || 'https://sender.helius-rpc.com/fast';
 const HELIUS_API_KEY = process.env.HELIUS_API_KEY || '';
 const JITO_ENDPOINT = process.env.JITO_ENDPOINT || 'https://mainnet.block-engine.jito.wtf';
+const JUPITER_ENDPOINT = process.env.JUPITER_ENDPOINT || 'https://tx.jup.ag';
+// SECURITY: never hardcode a real key. Required by tx.jup.ag's x-api-key header.
+const JUPITER_API_KEY = process.env.JUPITER_API_KEY || '';
 
 // Ordered, de-duplicated provider chain: [primary, ...fallbacks].
 const providerChain = [EXECUTION_PROVIDER, ...EXECUTION_FALLBACKS].filter(
@@ -82,6 +88,26 @@ const planProviderRequest = (provider, transactions) => {
           }),
         },
       };
+    case 'jupiter': {
+      // tx.jup.ag lands single transactions only (no bundle equivalent) and
+      // requires: (1) an x-api-key header, (2) base64 encoding only, and
+      // (3) the signed tx must already carry a Jupiter tip instruction.
+      if (!JUPITER_API_KEY) throw new Error('jupiter provider requires JUPITER_API_KEY');
+      const base64Tx = Buffer.from(bs58.decode(transactions[0])).toString('base64');
+      return {
+        url: JUPITER_ENDPOINT,
+        options: {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-api-key': JUPITER_API_KEY },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            method: 'sendTransaction',
+            params: [base64Tx, { encoding: 'base64', skipPreflight: true, maxRetries: 0 }],
+          }),
+        },
+      };
+    }
     default:
       throw new Error(`Unknown execution provider: ${provider}`);
   }
@@ -92,8 +118,8 @@ const sendBundleViaProviders = async (transactions) => {
   const failures = [];
   for (const provider of providerChain) {
     try {
-      // Helius Sender is single-tx: send each and collect results.
-      const txGroups = provider === 'helius-sender'
+      // Helius Sender and Jupiter (tx.jup.ag) are single-tx: send each and collect results.
+      const txGroups = provider === 'helius-sender' || provider === 'jupiter'
         ? transactions.map((tx) => [tx])
         : [transactions];
 
