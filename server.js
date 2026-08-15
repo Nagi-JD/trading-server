@@ -147,6 +147,12 @@ const sendBundleViaProviders = async (transactions) => {
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
+// Health check for the frontend's server-discovery/ping logic
+// (solana-ui's pingHealthyServer expects 200 + { status: "healthy" }).
+app.get('/health', (req, res) => {
+  res.json({ status: 'healthy' });
+});
+
 // Rate limiting state
 const rateLimitState = {
   count: 0,
